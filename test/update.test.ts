@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { createHash } from "node:crypto";
-import { UpdateClient, _vsixUrlAllowed } from "../src/update/client";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { UpdateClient, _manifestSignaturePayload, _manifestSignatureRequired,
+         _verifyManifestSignature, _vsixUrlAllowed } from "../src/update/client";
 
 // wave-2A-F01 introduces a 10 KiB minimum-size sanity for the VSIX bytes
 // (rejects empty / garbage / CDN-stub downloads). Use a 12 KiB filler.
@@ -13,10 +14,10 @@ describe("UpdateClient", () => {
     const f = vi.fn(async (url: string) => {
       if (url.endsWith("/v1/ext/manifest"))
         return { ok: true, json: async () => ({ version: "0.2.0", sha256: sha,
-          url: "http://b/v1/ext/vibe-ads.vsix" }) } as Response;
+          url: "http://127.0.0.1:6080/v1/ext/vibe-ads.vsix" }) } as Response;
       return { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length) } as Response;
     });
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
       async (buf) => { installed.push(Buffer.from(buf)); });
     expect(await c.checkOnce()).toBe(true);
     expect(installed).toHaveLength(1);
@@ -26,9 +27,9 @@ describe("UpdateClient", () => {
     const f = vi.fn(async (url: string) =>
       url.endsWith("/manifest")
         ? ({ ok: true, json: async () => ({ version: "0.2.0", sha256: "deadbeef",
-            url: "http://b/x.vsix" }) } as Response)
+            url: "http://127.0.0.1:6080/x.vsix" }) } as Response)
         : ({ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length) } as Response));
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); });
     expect(await c.checkOnce()).toBe(false);
     expect(installed).toHaveLength(0);
@@ -38,12 +39,12 @@ describe("UpdateClient", () => {
     const f = vi.fn(async (url: string) =>
       url.endsWith("/manifest")
         ? ({ ok: true, json: async () => ({ version: "0.2.0", sha256: sha,
-            url: "http://b/x.vsix" }) } as Response)
+            url: "http://127.0.0.1:6080/x.vsix" }) } as Response)
         : ({ ok: true, arrayBuffer: async () =>
             bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length)
           } as Response));
     let mark: string | undefined;
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); },
       { attempted: (v) => v === mark, markAttempted: (v) => { mark = v; } });
     expect(await c.checkOnce()).toBe(true);   // first: installs, marks 0.2.0
@@ -64,14 +65,14 @@ describe("UpdateClient", () => {
     const f = vi.fn(async (url: string) => {
       if (url.endsWith("/manifest"))
         return { ok: true, json: async () => ({ version: "0.2.0", sha256: sha,
-          url: "http://b/x.vsix" }) } as Response;
+          url: "http://127.0.0.1:6080/x.vsix" }) } as Response;
       vsixFetches++;
       await gate;                              // download outlives the next poll
       return { ok: true, arrayBuffer: async () =>
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length)
       } as Response;
     });
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); });
     const first = c.checkOnce();
     // Let the first call pass the manifest fetch and park on the download.
@@ -104,11 +105,11 @@ describe("UpdateClient", () => {
     const f = vi.fn(async (url: string) =>
       url.endsWith("/manifest")
         ? ({ ok: true, json: async () => ({ version: "0.2.0", sha256: tinySha,
-            url: "http://b/x.vsix" }) } as Response)
+            url: "http://127.0.0.1:6080/x.vsix" }) } as Response)
         : ({ ok: true, arrayBuffer: async () =>
             tinyBytes.buffer.slice(tinyBytes.byteOffset,
                                    tinyBytes.byteOffset + tinyBytes.length) } as Response));
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); });
     expect(await c.checkOnce()).toBe(false);
     expect(installed).toHaveLength(0);
@@ -135,6 +136,22 @@ describe("UpdateClient", () => {
       if (original === undefined) delete process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG;
       else process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG = original;
     }
+  });
+
+  it("requires signatures by default for non-loopback production update bases", async () => {
+    const installed: Buffer[] = [];
+    const f = vi.fn(async (url: string) =>
+      url.endsWith("/manifest")
+        ? ({ ok: true, json: async () => ({ version: "0.2.0", sha256: sha,
+            url: "https://kickbacks-vsix.storage.googleapis.com/kickbacks.vsix" }) } as Response)
+        : ({ ok: true, arrayBuffer: async () =>
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length)
+          } as Response));
+    const c = new UpdateClient("https://kickbacks-public-x.a.run.app", "0.1.0",
+      f as never, async (b) => { installed.push(Buffer.from(b)); });
+    expect(await c.checkOnce()).toBe(false);
+    expect(installed).toHaveLength(0);
+    expect(f).toHaveBeenCalledTimes(1);
   });
 
   // wave-2A-F01 layer 3: VSIX download-origin pin (supply-chain).
@@ -169,8 +186,9 @@ describe("UpdateClient", () => {
     // Another bucket on the shared GCS host is NOT allowed.
     expect(_vsixUrlAllowed(
       "https://storage.googleapis.com/some-other-bucket/x.vsix", base)).toBe(false);
-    // Dev self-host: same origin as the manifest base, or loopback.
-    expect(_vsixUrlAllowed("http://b/x.vsix", "http://b")).toBe(true);
+    // Dev self-host: loopback same-origin or explicit loopback artifact URL.
+    expect(_vsixUrlAllowed("http://127.0.0.1:6080/x.vsix",
+      "http://127.0.0.1:6080")).toBe(true);
     expect(_vsixUrlAllowed("http://127.0.0.1:6080/x.vsix", base)).toBe(true);
     // Attacker host + non-https are rejected.
     expect(_vsixUrlAllowed("https://evil.example.com/x.vsix", base)).toBe(false);
@@ -178,7 +196,7 @@ describe("UpdateClient", () => {
     expect(_vsixUrlAllowed("not a url", base)).toBe(false);
   });
 
-  it("with flag OFF and no signature -> install proceeds (backward-compat)", async () => {
+  it("allows unsigned manifests only for loopback dev updates", async () => {
     const original = process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG;
     delete process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG;
     try {
@@ -186,16 +204,41 @@ describe("UpdateClient", () => {
       const f = vi.fn(async (url: string) =>
         url.endsWith("/manifest")
           ? ({ ok: true, json: async () => ({ version: "0.2.0", sha256: sha,
-              url: "http://b/x.vsix" }) } as Response)
+              url: "http://127.0.0.1:6080/x.vsix" }) } as Response)
           : ({ ok: true, arrayBuffer: async () =>
               bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length)
             } as Response));
-      const c = new UpdateClient("http://b", "0.1.0", f as never,
+      const c = new UpdateClient("http://127.0.0.1:6080", "0.1.0", f as never,
         async (b) => { installed.push(Buffer.from(b)); });
       expect(await c.checkOnce()).toBe(true);
       expect(installed).toHaveLength(1);
     } finally {
       if (original !== undefined) process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG = original;
     }
+  });
+
+  it("signature payload covers rollback_to so rollback metadata cannot be forged", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const pub = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const manifest = {
+      version: "0.1.5",
+      sha256: sha,
+      url: "https://kickbacks-vsix.storage.googleapis.com/kickbacks.vsix",
+      rollback_to: "0.2.0",
+    };
+    const signature = sign(null, Buffer.from(_manifestSignaturePayload(manifest)),
+      privateKey).toString("base64");
+    expect(_verifyManifestSignature({ ...manifest, signature }, pub)).toBe(true);
+    expect(_verifyManifestSignature({
+      ...manifest, rollback_to: "0.3.0", signature,
+    }, pub)).toBe(false);
+  });
+
+  it("production update bases require signatures; loopback bases do not", () => {
+    expect(_manifestSignatureRequired("https://kickbacks-public-x.a.run.app")).toBe(true);
+    expect(_manifestSignatureRequired("http://127.0.0.1:6080")).toBe(false);
+    expect(_manifestSignatureRequired("http://localhost:6080")).toBe(false);
+    expect(_manifestSignatureRequired("http://[::1]:6080")).toBe(false);
+    expect(_manifestSignatureRequired("not a url")).toBe(true);
   });
 });

@@ -47,7 +47,7 @@ function isNewer(a: string, b: string): boolean {
   return false;
 }
 
-// wave-2A-F01 — VSIX size sanity + signature scaffolding.
+// wave-2A-F01 — VSIX size sanity + signature verification.
 //
 // A self-hosted manifest (no marketplace fallback) where the only integrity
 // check is sha256 vs the manifest itself is integrity-vs-the-manifest, not
@@ -58,14 +58,10 @@ function isNewer(a: string, b: string): boolean {
 //    (CDN partial response, ad-blocker stub, etc) before they reach the
 //    installer. 10 KiB is far below any real VSIX (89 KB at audit time).
 //
-// 2. FLAG-GATED Ed25519 signature verification over the manifest blob.
-//    When VIBE_ADS_REQUIRE_MANIFEST_SIG=1 and a public key is compiled in
-//    via VIBE_ADS_MANIFEST_PUBKEY_PEM (esbuild --define), the manifest
-//    MUST carry a base64 `signature` field that verifies against
-//    `${version}\n${sha256}\n${url}` under the embedded public key.
-//    The flag is OFF by default so existing deployments keep working
-//    until a key story is set up (see docs/runbooks/extension-signing.md
-//    when it lands as part of the wave-2A-F01 operational follow-up).
+// 2. Ed25519 signature verification over the manifest blob. Production update
+//    bases (anything non-loopback) MUST compile a public key into the extension
+//    and the manifest MUST carry a base64 `signature` field. Loopback remains
+//    unsigned so local dev rigs and hermetic tests do not need signing keys.
 const MIN_VSIX_BYTES = 10 * 1024;
 
 declare const __MANIFEST_PUBKEY_PEM__: string | undefined;
@@ -81,19 +77,39 @@ function _embeddedPubkeyPem(): string | null {
   return null;
 }
 
-function _verifyManifestSignature(
-  m: { version: string; sha256: string; url: string; signature?: string },
+export function _manifestSignaturePayload(
+  m: { version: string; sha256: string; url: string; rollback_to?: string },
+): string {
+  return `${m.version}\n${m.sha256}\n${m.url}\n${m.rollback_to || ""}`;
+}
+
+export function _verifyManifestSignature(
+  m: { version: string; sha256: string; url: string; signature?: string;
+       rollback_to?: string },
   pubkeyPem: string,
 ): boolean {
   if (!m.signature) return false;
   try {
     return verify(
       null,
-      Buffer.from(`${m.version}\n${m.sha256}\n${m.url}`),
+      Buffer.from(_manifestSignaturePayload(m)),
       pubkeyPem,
       Buffer.from(m.signature, "base64"),
     );
   } catch { return false; }
+}
+
+function _isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1"
+    || host === "::1" || host === "[::1]";
+}
+
+export function _manifestSignatureRequired(base: string): boolean {
+  try {
+    return !_isLoopbackHost(new URL(base).hostname.toLowerCase());
+  } catch {
+    return true;
+  }
 }
 
 // wave-2A-F01 layer 3 — VSIX download-origin pin. The sha256 above proves the
@@ -110,10 +126,13 @@ export function _vsixUrlAllowed(rawUrl: string, base: string): boolean {
   let u: URL;
   try { u = new URL(rawUrl); } catch { return false; }
   const host = u.hostname.toLowerCase();
-  // Dev / self-host escape hatches.
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+  // Dev / self-host escape hatches. Unsigned same-origin artifacts are allowed
+  // only for loopback manifests; production same-host URLs still have to be
+  // HTTPS and signature-authenticated by the manifest gate.
+  if (_isLoopbackHost(host)) return true;
   try {
-    if (host === new URL(base).hostname.toLowerCase()) return true;
+    const baseHost = new URL(base).hostname.toLowerCase();
+    if (host === baseHost && _isLoopbackHost(baseHost)) return true;
   } catch { /* base isn't a URL — fall through to the prod allowlist */ }
   // Production: HTTPS to the published kickbacks-vsix GCS bucket only.
   if (u.protocol !== "https:") return false;
@@ -202,9 +221,10 @@ export class UpdateClient {
       // (sha mismatch, body-read abort). The 90s poll means a flapping CDN
       // would otherwise burn bandwidth + CPU every 90s indefinitely.
       if (this.guard?.transientFailed?.(m.version, m.sha256)) return false;
-      // wave-2A-F01: flag-gated manifest signature verification.
+      // wave-2A-F01: production manifest signature verification. Hashes prove
+      // integrity vs. the manifest; signatures prove release authenticity.
       const pubkey = _embeddedPubkeyPem();
-      const requireSig = !!pubkey
+      const requireSig = _manifestSignatureRequired(this.base)
         || process.env.KICKBACKS_REQUIRE_MANIFEST_SIG === "1"
         || process.env.VIBE_ADS_REQUIRE_MANIFEST_SIG === "1";
       if (requireSig) {

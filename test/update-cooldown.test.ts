@@ -19,6 +19,7 @@ const COOLDOWN_MS = 30 * 60 * 1000;
 const TRANSIENT_COOLDOWN_MS = 15 * 60 * 1000;
 const bytes = Buffer.alloc(12 * 1024, 0x42);
 const sha = createHash("sha256").update(bytes).digest("hex");
+const DEV_BASE = "http://127.0.0.1:6080";
 
 // Wave-2P-F01: mirrors the extension.ts composite-key wiring exactly so this
 // fixture exercises the same flap-suppression logic prod uses. `updKey`
@@ -51,7 +52,7 @@ function makeFetch(version: string, vsixBytes: Buffer, vsixSha: string) {
   return vi.fn(async (url: string) =>
     url.endsWith("/manifest")
       ? ({ ok: true, json: async () => ({ version, sha256: vsixSha,
-          url: "http://b/x.vsix" }) } as Response)
+          url: `${DEV_BASE}/x.vsix` }) } as Response)
       : ({ ok: true, arrayBuffer: async () =>
           vsixBytes.buffer.slice(vsixBytes.byteOffset,
                                  vsixBytes.byteOffset + vsixBytes.length) } as Response));
@@ -64,7 +65,7 @@ describe("wave-2H-F04 cooldown-bounded update guard", () => {
     const guard = makeGuard(now);
     const installed: Buffer[] = [];
     const f = makeFetch("0.2.0", bytes, sha);
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient(DEV_BASE, "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); }, guard);
 
     expect(await c.checkOnce()).toBe(true);   // installs, marks attempted
@@ -105,12 +106,12 @@ describe("wave-2H-F04 cooldown-bounded update guard", () => {
     const f = vi.fn(async (url: string) =>
       url.endsWith("/manifest")
         ? ({ ok: true, json: async () => ({ version: "0.3.54",
-            sha256: serve.sha, url: "http://b/x.vsix" }) } as Response)
+            sha256: serve.sha, url: `${DEV_BASE}/x.vsix` }) } as Response)
         : ({ ok: true, arrayBuffer: async () =>
             serve.bytes.buffer.slice(serve.bytes.byteOffset,
               serve.bytes.byteOffset + serve.bytes.length) } as Response));
 
-    const c = new UpdateClient("http://b", "0.3.53", f as never,
+    const c = new UpdateClient(DEV_BASE, "0.3.53", f as never,
       async (b) => { installed.push(Buffer.from(b)); }, guard);
 
     // Round 1: serve artifact A. Installs + marks (0.3.54, shaA).
@@ -139,7 +140,7 @@ describe("wave-2H-F04 cooldown-bounded update guard", () => {
     const installed: Buffer[] = [];
     // Manifest sha intentionally doesn't match the bytes -> transient fail.
     const f = makeFetch("0.2.0", bytes, "deadbeef00");
-    const c = new UpdateClient("http://b", "0.1.0", f as never,
+    const c = new UpdateClient(DEV_BASE, "0.1.0", f as never,
       async (b) => { installed.push(Buffer.from(b)); }, guard);
 
     expect(await c.checkOnce()).toBe(false);

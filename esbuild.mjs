@@ -28,6 +28,13 @@ const isTrue = (v) => v === "true" || v === "1" || v === "yes" || v === "on";
 // extension/ sits one level below the repo root.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT_ENV = readDotenv(resolve(HERE, "..", ".env"));
+const envValue = (...names) => {
+  for (const name of names) {
+    const v = process.env[name] ?? ROOT_ENV[name];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return "";
+};
 const BUILD_FLAGS = {
   developer: isTrue(ROOT_ENV.KICKBACKS_DEVELOPER ?? "false"),
   adminUrl: ROOT_ENV.KICKBACKS_ADMIN_URL ?? "",
@@ -35,9 +42,8 @@ const BUILD_FLAGS = {
   verbose: isTrue(ROOT_ENV.KICKBACKS_VERBOSE ?? "false"),
   codex: isTrue(ROOT_ENV.KICKBACKS_CODEX ?? "false"),
   testHooks: isTrue(ROOT_ENV.KICKBACKS_TEST_HOOKS ?? "false"),
-  manifestPubkeyPem: ROOT_ENV.KICKBACKS_MANIFEST_PUBKEY_PEM
-    ?? ROOT_ENV.VIBE_ADS_MANIFEST_PUBKEY_PEM
-    ?? "",
+  manifestPubkeyPem: envValue("KICKBACKS_MANIFEST_PUBKEY_PEM",
+    "VIBE_ADS_MANIFEST_PUBKEY_PEM"),
 };
 
 function copyAsset(src, dest) {

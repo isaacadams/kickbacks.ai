@@ -8,6 +8,17 @@ import { resolveCodexBlockAsset } from "../src/adapters/codex/adapter";
 // bundled into extension.js. esbuild must cpSync it to dist/adapters/codex/,
 // and the adapter's resolver must find it there in the bundled layout.
 describe("S9 bundled Codex asset", () => {
+  it("embeds manifest pubkeys supplied through the release environment", () => {
+    const pem = "-----BEGIN PUBLIC KEY-----\\nci-release-key\\n-----END PUBLIC KEY-----";
+    execFileSync("node", ["esbuild.mjs"], {
+      cwd: join(__dirname, ".."),
+      stdio: "pipe",
+      env: { ...process.env, KICKBACKS_MANIFEST_PUBKEY_PEM: pem },
+    });
+    const bundle = readFileSync(join(__dirname, "..", "dist", "extension.js"), "utf8");
+    expect(bundle).toContain("ci-release-key");
+  });
+
   it("real esbuild build places dist/adapters/codex/block.asset.js", () => {
     execFileSync("node", ["esbuild.mjs"],
       { cwd: join(__dirname, ".."), stdio: "pipe" });
